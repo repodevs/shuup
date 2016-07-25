@@ -102,7 +102,7 @@ def get_stock_adjustment_div(request, supplier, product):
     :rtype: str
     """
     latest_adjustment = StockAdjustment.objects.filter(
-        product=product, supplier=supplier).order_by("-created_on").first()
+        product=product, supplier=supplier, type=StockAdjustmentType.INVENTORY).order_by("-created_on").first()
     purchase_price = (latest_adjustment.purchase_price_value if latest_adjustment else Decimal("0.00"))
     context = {
         "product": product,
