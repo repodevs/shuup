@@ -14,8 +14,8 @@ from django.test import override_settings
 from django.utils.timezone import now
 
 from shuup.core.excs import (
-    NoPaymentToCreateException, NoProductsToShipException,
-    RefundExceedsAmountException
+    InvalidRefundAmountException, NoPaymentToCreateException,
+    NoProductsToShipException, RefundExceedsAmountException
 )
 from shuup.core.models import (
     Order, OrderLine, OrderLineTax, OrderLineType, OrderStatus, PaymentStatus,
@@ -25,7 +25,7 @@ from shuup.core.pricing import TaxfulPrice, TaxlessPrice
 from shuup.testing.factories import (
     create_empty_order, create_order_with_product, create_product, get_address,
     get_default_product, get_default_shop, get_default_supplier,
-    get_default_tax, get_initial_order_status, get_shipping_method
+    get_default_tax, get_initial_order_status
 )
 from shuup.utils.money import Money
 from shuup_tests.simple_supplier.utils import get_simple_supplier
@@ -253,6 +253,7 @@ def test_payments():
     assert order.payment_status == PaymentStatus.FULLY_PAID
     assert not order.can_edit()
 
+
 @pytest.mark.django_db
 def test_refunds():
     shop = get_default_shop()
@@ -367,7 +368,6 @@ def test_refund_entire_order_with_product_restock():
 
     order = create_order_with_product(product, supplier, 2, 200, shop=shop)
     order.cache_prices()
-    original_total_price = order.taxful_total_price
 
     check_stock_counts(supplier, product, 5, 3)
 
@@ -376,7 +376,6 @@ def test_refund_entire_order_with_product_restock():
 
     # restock logical count
     check_stock_counts(supplier, product, 5, 5)
-
 
 
 @pytest.mark.django_db
@@ -403,14 +402,15 @@ def test_refund_with_shipment(restock):
     # Shipment should decrease physical count by 2, logical by none
     order.create_shipment({product_line.product: 2}, supplier=supplier)
     check_stock_counts(supplier, product, physical=8, logical=6)
-    assert order.shipping_status ==  ShippingStatus.PARTIALLY_SHIPPED
+    assert order.shipping_status == ShippingStatus.PARTIALLY_SHIPPED
 
     # Check correct refunded quantities
     assert not product_line.refunded_quantity
 
     # Create a refund that refunds from unshipped quantity first, then shipped quantity, check stocks
     check_stock_counts(supplier, product, physical=8, logical=6)
-    order.create_refund([{"line": product_line, "quantity": 3, "amount": Money(600, order.currency), "restock_products": restock}])
+    order.create_refund([
+        {"line": product_line, "quantity": 3, "amount": Money(600, order.currency), "restock_products": restock}])
     assert product_line.refunded_quantity == 3
     assert order.shipping_status == ShippingStatus.FULLY_SHIPPED
     if restock:
@@ -419,7 +419,8 @@ def test_refund_with_shipment(restock):
         check_stock_counts(supplier, product, physical=8, logical=6)
 
     # Create a second refund that refunds the last shipped quantity, check stocks
-    order.create_refund([{"line": product_line, "quantity": 1, "amount": Money(200, order.currency), "restock_products": restock}])
+    order.create_refund([
+        {"line": product_line, "quantity": 1, "amount": Money(200, order.currency), "restock_products": restock}])
     assert product_line.refunded_quantity == 4
     if restock:
         # Make sure we're not restocking more than maximum restockable quantity
@@ -450,7 +451,8 @@ def test_refund_without_shipment(restock):
 
     # Restock value shouldn't matter if we don't have any shipments
     product_line = order.lines.first()
-    order.create_refund([{"line": product_line, "quantity": 2, "amount": Money(400, order.currency), "restock_products": restock}])
+    order.create_refund([
+        {"line": product_line, "quantity": 2, "amount": Money(400, order.currency), "restock_products": restock}])
 
     if restock:
         check_stock_counts(supplier, product, physical=10, logical=10)
@@ -469,7 +471,7 @@ def test_max_refundable_amount():
         default_price=10,
     )
     order = create_order_with_product(product, supplier, 2, 200, shop=shop)
-
+    order.cache_prices()
     assert len(order.lines.all()) == 1
 
     line = order.lines.first()
@@ -494,16 +496,49 @@ def test_refunds_for_discounted_order_lines():
     )
 
     order = create_order_with_product(product, supplier, 2, 200, shop=shop)
-    order.cache_prices()
+    discount_line = OrderLine(type=OrderLineType.DISCOUNT, quantity=1, discount_amount_value=Decimal("0.54321"))
+    order.lines.add(discount_line)
 
-    product_line = order.lines.first()
+    product_line = order.lines.filter(type=OrderLineType.PRODUCT).first()
     product_line.discount_amount = TaxfulPrice(100, order.currency)
+    product_line.save()
     taxful_price_with_discount = product_line.taxful_price
+    order.cache_prices()
+    order.save()
+
     assert product_line.base_price == TaxfulPrice(400, order.currency)
     assert taxful_price_with_discount == TaxfulPrice(300, order.currency)
 
-    order.create_refund([{"line": product_line, "quantity": 1, "amount": (taxful_price_with_discount / 2).amount}])
-    assert order.lines.refunds().first().taxful_price == (-taxful_price_with_discount / 2)
+    # try to refund only the product line - should fail since this would result in a negative total
+    with pytest.raises(RefundExceedsAmountException):
+        order.create_refund([{"line": product_line, "quantity": 2, "amount": taxful_price_with_discount.amount}])
+
+    # try to refund the product line with a negative amount
+    with pytest.raises(InvalidRefundAmountException):
+        order.create_refund([{"line": product_line, "quantity": 1, "amount": -taxful_price_with_discount.amount}])
+    # try to refund the discount line with a positive amount
+    with pytest.raises(InvalidRefundAmountException):
+        order.create_refund([{"line": discount_line, "quantity": 1, "amount": -discount_line.taxful_price.amount}])
+
+    order.create_refund([
+        {"line": discount_line, "quantity": 1, "amount": discount_line.taxful_price.amount},
+        {"line": product_line, "quantity": 2, "amount": taxful_price_with_discount.amount}
+    ])
+    assert product_line.max_refundable_amount.value == 0
+    assert discount_line.max_refundable_amount.value == 0
+    assert order.taxful_total_price.value == 0
+
+    order = create_order_with_product(product, supplier, 2, 200, shop=shop)
+    discount_line = OrderLine(type=OrderLineType.DISCOUNT, quantity=1, discount_amount_value=Decimal("0.54321"))
+    order.lines.add(discount_line)
+    product_line = order.lines.filter(type=OrderLineType.PRODUCT).first()
+    product_line.discount_amount = TaxfulPrice(100, order.currency)
+    product_line.save()
+    order.cache_prices()
+    order.save()
+
+    order.create_full_refund(restock_products=False)
+    assert order.taxful_total_price.value == 0
 
 
 @pytest.mark.django_db
@@ -558,6 +593,7 @@ def test_can_create_payment():
     assert not order.can_create_payment()
 
     order = create_order_with_product(product, supplier, 1, 200, shop=shop)
+    order.cache_prices()
     assert order.can_create_payment()
 
     # Canceled orders can't create payments
@@ -565,14 +601,17 @@ def test_can_create_payment():
     assert not order.can_create_payment()
 
     order = create_order_with_product(product, supplier, 2, 200, shop=shop)
+    order.cache_prices()
     assert order.can_create_payment()
 
     # Partially refunded orders can create payments
-    order.create_refund([{"line": order.lines.first(), "quantity": 1, "amount": Money(200, order.currency), "restock": False}])
+    order.create_refund([
+        {"line": order.lines.first(), "quantity": 1, "amount": Money(200, order.currency), "restock": False}])
     assert order.can_create_payment()
 
     # But fully refunded orders can't
-    order.create_refund([{"line": order.lines.first(), "quantity": 1, "amount": Money(200, order.currency), "restock": False}])
+    order.create_refund([
+        {"line": order.lines.first(), "quantity": 1, "amount": Money(200, order.currency), "restock": False}])
     assert not order.can_create_payment()
 
 
@@ -588,14 +627,17 @@ def test_can_create_refund():
     )
 
     order = create_order_with_product(product, supplier, 2, 200, shop=shop)
+    order.cache_prices()
     assert order.can_create_payment()
 
     # Partially refunded orders can create refunds
-    order.create_refund([{"line": order.lines.first(), "quantity": 1, "amount": Money(200, order.currency), "restock": False}])
+    order.create_refund([
+        {"line": order.lines.first(), "quantity": 1, "amount": Money(200, order.currency), "restock": False}])
     assert order.can_create_refund()
 
     # But fully refunded orders can't
-    order.create_refund([{"line": order.lines.first(), "quantity": 1, "amount": Money(200, order.currency), "restock": False}])
+    order.create_refund([
+        {"line": order.lines.first(), "quantity": 1, "amount": Money(200, order.currency), "restock": False}])
     assert not order.can_create_refund()
 
 
@@ -617,9 +659,9 @@ def test_product_summary():
 
     # Order with 2 unshipped, non-refunded items and a shipping cost
     order = create_order_with_product(product, supplier, 2, 200, shop=shop)
+    order.cache_prices()
     product_line = order.lines.first()
-    sm = get_shipping_method(name="test", price=10)
-    shipping_line  = order.lines.create(type=OrderLineType.SHIPPING, base_unit_price_value=5, quantity=1)
+    shipping_line = order.lines.create(type=OrderLineType.SHIPPING, base_unit_price_value=5, quantity=1)
 
     # Make sure no invalid entries and check product quantities
     product_summary = order.get_product_summary()
