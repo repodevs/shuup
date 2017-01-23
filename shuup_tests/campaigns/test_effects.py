@@ -18,8 +18,8 @@ from shuup.campaigns.models.basket_effects import (
     BasketDiscountAmount, BasketDiscountPercentage
 )
 from shuup.campaigns.models.basket_line_effects import (
-    DiscountFromCategoryProducts, DiscountFromProduct, FreeProductLine
-)
+    DiscountFromCategoryProducts, DiscountFromProduct, FreeProductLine,
+    FreeShippingMethodLine)
 from shuup.core.models import OrderLineType, ShopProduct
 from shuup.core.order_creator._source import LineSource
 from shuup.front.basket import get_basket
@@ -509,3 +509,39 @@ def test_discount_no_limits(rf, include_tax):
     line = final_lines[0]
     assert line.discount_amount == expected_discount_amount
     assert basket.total_price == original_price - expected_discount_amount
+
+
+@pytest.mark.django_db
+def test_basket_free_shipping_method(rf):
+    request, shop, _ = initialize_test(rf, False)
+
+    basket = get_basket(request)
+    supplier = get_default_supplier()
+
+    single_product_price = "50"
+    shipping_method = get_shipping_method(shop=shop, price=10)
+
+    product = create_product(printable_gibberish(), shop=shop, supplier=supplier, default_price=single_product_price)
+    basket.add_product(supplier=supplier, shop=shop, product=product, quantity=2)
+    basket.shipping_method = shipping_method
+    basket.save()
+
+    campaign = BasketCampaign.objects.create(active=True, shop=shop, name="test", public_name="test")
+
+    effect = FreeShippingMethodLine.objects.create(campaign=campaign)
+    effect.methods.add(shipping_method)
+
+    basket.uncache()
+    final_lines = basket.get_final_lines()
+
+    # Product line and shipping method line
+    assert len(final_lines) == 2
+
+    line_types = [l.type for l in final_lines]
+    assert OrderLineType.DISCOUNT not in line_types
+
+    for line in basket.get_final_lines():
+        assert line.type in [OrderLineType.PRODUCT, OrderLineType.SHIPPING]
+        if line.type == OrderLineType.SHIPPING:
+            assert basket.shipping_method == shipping_method
+            assert line.base_unit_price == shop.create_price(0)

@@ -11,8 +11,8 @@ from shuup.campaigns.models.basket_effects import (
     BasketDiscountAmount, BasketDiscountPercentage
 )
 from shuup.campaigns.models.basket_line_effects import (
-    DiscountFromCategoryProducts, DiscountFromProduct, FreeProductLine
-)
+    DiscountFromCategoryProducts, DiscountFromProduct, FreeProductLine,
+    FreeShippingMethodLine)
 from shuup.core.models import Category
 
 from ._base import BaseEffectModelForm
@@ -36,6 +36,11 @@ class BasketDiscountPercentageForm(BaseEffectModelForm):
 class FreeProductLineForm(BaseEffectModelForm):
     class Meta(BaseEffectModelForm.Meta):
         model = FreeProductLine
+
+
+class FreeShippingMethodLineForm(BaseEffectModelForm):
+    class Meta(BaseEffectModelForm.Meta):
+        model = FreeShippingMethodLine
 
 
 class DiscountFromProductForm(BaseEffectModelForm):

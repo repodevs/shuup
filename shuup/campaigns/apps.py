@@ -46,6 +46,7 @@ class CampaignAppConfig(AppConfig):
             "shuup.campaigns.admin_module.forms:FreeProductLineForm",
             "shuup.campaigns.admin_module.forms:DiscountFromProductForm",
             "shuup.campaigns.admin_module.forms:DiscountFromCategoryProductsForm",
+            "shuup.campaigns.admin_module.forms:FreeShippingMethodLineForm",
         ],
         "campaign_context_condition": [
             "shuup.campaigns.admin_module.forms:ContactGroupConditionForm",

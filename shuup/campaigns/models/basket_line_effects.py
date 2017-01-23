@@ -11,7 +11,8 @@ from django.utils.translation import ugettext_lazy as _
 
 from shuup.core.fields import MoneyValueField
 from shuup.core.models import (
-    Category, OrderLineType, PolymorphicShuupModel, Product
+    Category, OrderLineType, PolymorphicShuupModel, Product,
+    ShippingMethod
 )
 from shuup.core.order_creator._source import LineSource
 
@@ -76,6 +77,38 @@ class FreeProductLine(BasketLineEffect):
             )
             lines.append(order_source.create_line(**line_data))
         return lines
+
+
+class FreeShippingMethodLine(BasketLineEffect):
+    identifier = "free_shipping_method_line_effect"
+    model = ShippingMethod
+    name = _("Free Shipping method(s)")
+
+    methods = models.ManyToManyField(ShippingMethod, verbose_name=_("shipping method"))
+
+    @property
+    def description(self):
+        return _("Select shipping method(s) which will be free.")
+
+    @property
+    def values(self):
+        return self.methods
+
+    @values.setter
+    def values(self, values):
+        self.methods = values
+
+    def get_discount_lines(self, order_source, original_lines):
+        shipping_method_ids = self.methods.values_list("pk", flat=True)
+        if order_source.shipping_method_id not in shipping_method_ids:
+            return []
+
+        shop = order_source.shop
+        for line in original_lines:
+            if not line.type == OrderLineType.SHIPPING:
+                continue
+            line.base_unit_price = shop.create_price(0)
+        return []
 
 
 class DiscountFromProduct(BasketLineEffect):

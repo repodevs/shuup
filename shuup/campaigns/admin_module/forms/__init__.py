@@ -15,7 +15,7 @@ from ._basket_conditions import (
 from ._basket_effects import (
     BasketDiscountAmountForm, BasketDiscountPercentageForm,
     DiscountFromCategoryProductsForm, DiscountFromProductForm,
-    FreeProductLineForm
+    FreeProductLineForm, FreeShippingMethodLineForm
 )
 from ._catalog import CatalogCampaignForm
 from ._catalog_conditions import (
@@ -48,6 +48,7 @@ __all__ = [
     "DiscountFromCategoryProductsForm",
     "DiscountFromProductForm",
     "FreeProductLineForm",
+    "FreeShippingMethodLineForm",
     "ProductDiscountAmountForm",
     "ProductDiscountPercentageForm",
     "ProductFilterForm",
