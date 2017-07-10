@@ -16,10 +16,12 @@ from django.core.urlresolvers import reverse
 from django.test.utils import override_settings
 
 from shuup import configuration
+from shuup.admin.modules.contacts.views import ContactDetailView
 from shuup.core.models import CompanyContact
 from shuup.core.models import PersonContact
 from shuup.notify.models import Script
 from shuup.testing.factories import get_default_shop
+from shuup.testing.utils import apply_request_middleware
 
 username = "u-%d" % uuid.uuid4().time
 email = "%s@shuup.local" % username
@@ -240,7 +242,7 @@ def test_user_will_be_redirected_to_user_account_page_after_activation(client, r
 
 @pytest.mark.django_db
 @pytest.mark.parametrize("allow_company_registration", (False, True))
-def test_company_registration(django_user_model, client, allow_company_registration):
+def test_company_registration(django_user_model, client, allow_company_registration, rf, admin_user):
     if "shuup.front.apps.registration" not in settings.INSTALLED_APPS:
         pytest.skip("shuup.front.apps.registration required in installed apps")
 
@@ -259,17 +261,12 @@ def test_company_registration(django_user_model, client, allow_company_registrat
                 {
                     'fallback_language': {'constant': 'en'},
                     'template_data': {
-                        'pt-br': {'content_type': 'html', 'subject': '', 'body': ''},
                         'en': {
                             'content_type': 'html',
                             'subject': 'Company activated',
-                            'body': '{{customer.pk}} - activated'
+                            'body': 'Company has been approved. '
+                                    'Please activate your account by clicking the link: {{activation_url}}'
                         },
-                        'base': {'content_type': 'html', 'subject': '', 'body': ''},
-                        'it': {'content_type': 'html', 'subject': '', 'body': ''},
-                        'ja': {'content_type': 'html', 'subject': '', 'body': ''},
-                        'zh-hans': {'content_type': 'html', 'subject': '', 'body': ''},
-                        'fi': {'content_type': 'html', 'subject': '', 'body': ''}
                     },
                     'recipient': {'variable': 'customer_email'},
                     'language': {'variable': 'language'},
@@ -296,13 +293,11 @@ def test_company_registration(django_user_model, client, allow_company_registrat
                     {
                         'fallback_language': {'constant': 'en'},
                         'template_data': {
-                            'pt-br': {'content_type': 'html', 'subject': '', 'body': ''},
-                             'en': {'content_type': 'html', 'subject': 'Generic welcome message', 'body': 'Welcome!'},
-                             'base': {'content_type': 'html', 'subject': '', 'body': ''},
-                             'it': {'content_type': 'html', 'subject': '', 'body': ''},
-                             'ja': {'content_type': 'html', 'subject': '', 'body': ''},
-                             'zh-hans': {'content_type': 'html', 'subject': '', 'body': ''},
-                             'fi': {'content_type': 'html', 'subject': '', 'body': ''}
+                             'en': {
+                                 'content_type': 'html',
+                                 'subject': 'Generic welcome message',
+                                 'body': 'Welcome!'
+                             },
                         },
                         'recipient': {'variable': 'customer_email'},
                         'language': {'variable': 'language'},
@@ -311,12 +306,11 @@ def test_company_registration(django_user_model, client, allow_company_registrat
                     {
                         'fallback_language': {'constant': 'en'},
                         'template_data': {
-                            'pt-br': {'content_type': 'plain', 'subject': 'New company registered', 'body': ''},
-                            'en': {'content_type': 'plain', 'subject': 'New company registered', 'body': 'New company registered'},
-                            'it': {'content_type': 'plain', 'subject': 'New company registered', 'body': ''},
-                            'ja': {'content_type': 'plain', 'subject': 'New company registered', 'body': ''},
-                            'zh-hans': {'content_type': 'plain', 'subject': 'New company registered', 'body': ''},
-                            'fi': {'content_type': 'plain', 'subject': 'New company registered', 'body': ''}
+                            'en': {
+                                'content_type': 'plain',
+                                'subject': 'New company registered',
+                                'body': 'New company registered'
+                            },
                         },
                         'recipient': {'constant': 'admin@host.local'},
                         'language': {'constant': 'en'},
@@ -357,7 +351,7 @@ def test_company_registration(django_user_model, client, allow_company_registrat
         company = CompanyContact.objects.get(members__in=[contact])
 
         # one of each got created
-        assert django_user_model.objects.count() == 1
+        assert django_user_model.objects.count() == 2  # admin_user + registered user
         assert PersonContact.objects.count() == 1
         assert CompanyContact.objects.count() == 1
         # and they are innactive
@@ -365,7 +359,16 @@ def test_company_registration(django_user_model, client, allow_company_registrat
         assert CompanyContact.objects.filter(is_active=False).count() == 1
         assert mail.outbox[0].subject == "Generic welcome message"
         assert mail.outbox[1].subject == "New company registered"
-        company = CompanyContact.objects.first()
-        company.is_active = True
-        company.save(update_fields=("is_active",))
+        # Activating Company for the first time from admin triggers company_approved_by_admin event
+        request = apply_request_middleware(rf.post("/", {"set_is_active": "1"}), user=admin_user)
+        view_func = ContactDetailView.as_view()
+        response = view_func(request, pk=company.pk)
+        urls = re.findall(
+            'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\(\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+',
+            mail.outbox[2].body)
         assert mail.outbox[2].subject == "Company activated"
+        assert user.registrationprofile.activation_key in urls[0]
+        # User receives link to activate his own account
+        response = client.get(urls[0], follow=True)
+        user.refresh_from_db()
+        assert user.is_active is True
