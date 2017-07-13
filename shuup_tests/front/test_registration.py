@@ -19,6 +19,7 @@ from shuup import configuration
 from shuup.admin.modules.contacts.views import ContactDetailView
 from shuup.core.models import CompanyContact
 from shuup.core.models import PersonContact
+from shuup.front.apps.customer_information.views import CompanyEditView
 from shuup.notify.models import Script
 from shuup.testing.factories import get_default_shop
 from shuup.testing.utils import apply_request_middleware
@@ -242,13 +243,16 @@ def test_user_will_be_redirected_to_user_account_page_after_activation(client, r
 
 @pytest.mark.django_db
 @pytest.mark.parametrize("allow_company_registration", (False, True))
-def test_company_registration(django_user_model, client, allow_company_registration, rf, admin_user):
+@pytest.mark.parametrize("company_registration_requires_approval", (False, True))
+def test_company_registration(django_user_model, client, allow_company_registration,
+                              company_registration_requires_approval, rf, admin_user):
     if "shuup.front.apps.registration" not in settings.INSTALLED_APPS:
         pytest.skip("shuup.front.apps.registration required in installed apps")
 
     get_default_shop()
 
     configuration.set(None, "allow_company_registration", allow_company_registration)
+    configuration.set(None, "company_registration_requires_approval", company_registration_requires_approval)
 
     url = reverse("shuup:registration_register_company")
     Script.objects.create(
@@ -355,20 +359,147 @@ def test_company_registration(django_user_model, client, allow_company_registrat
         assert PersonContact.objects.count() == 1
         assert CompanyContact.objects.count() == 1
         # and they are innactive
-        assert PersonContact.objects.filter(is_active=False).count() == 1
-        assert CompanyContact.objects.filter(is_active=False).count() == 1
-        assert mail.outbox[0].subject == "Generic welcome message"
-        assert mail.outbox[1].subject == "New company registered"
-        # Activating Company for the first time from admin triggers company_approved_by_admin event
-        request = apply_request_middleware(rf.post("/", {"set_is_active": "1"}), user=admin_user)
-        view_func = ContactDetailView.as_view()
-        response = view_func(request, pk=company.pk)
-        urls = re.findall(
-            'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\(\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+',
-            mail.outbox[2].body)
-        assert mail.outbox[2].subject == "Company activated"
-        assert user.registrationprofile.activation_key in urls[0]
-        # User receives link to activate his own account
-        response = client.get(urls[0], follow=True)
-        user.refresh_from_db()
-        assert user.is_active is True
+        if company_registration_requires_approval:
+            assert PersonContact.objects.filter(is_active=False).count() == 1
+            assert CompanyContact.objects.filter(is_active=False).count() == 1
+            assert mail.outbox[0].subject == "Generic welcome message"
+            assert mail.outbox[1].subject == "New company registered"
+            # Activating Company for the first time from admin triggers company_approved_by_admin event
+            request = apply_request_middleware(rf.post("/", {"set_is_active": "1"}), user=admin_user)
+            view_func = ContactDetailView.as_view()
+            response = view_func(request, pk=company.pk)
+            urls = re.findall(
+                'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\(\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+',
+                mail.outbox[2].body)
+            assert mail.outbox[2].subject == "Company activated"
+            assert user.registrationprofile.activation_key in urls[0]
+            # User receives link to activate his own account
+            response = client.get(urls[0], follow=True)
+            user.refresh_from_db()
+            assert user.is_active is True
+        else:
+            assert PersonContact.objects.filter(is_active=True).count() == 1
+            assert CompanyContact.objects.filter(is_active=True).count() == 1
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("allow_company_registration", (False, True))
+@pytest.mark.parametrize("company_registration_requires_approval", (False, True))
+def test_convert_account_to_company(allow_company_registration, company_registration_requires_approval, rf, admin_user):
+    if "shuup.front.apps.registration" not in settings.INSTALLED_APPS:
+        pytest.skip("shuup.front.apps.registration required in installed apps")
+
+    get_default_shop()
+
+    configuration.set(None, "allow_company_registration", allow_company_registration)
+    configuration.set(None, "company_registration_requires_approval", company_registration_requires_approval)
+
+    Script.objects.create(
+        event_identifier="company_registration_received",
+        name="Send Company Registration Received Email",
+        enabled=True,
+        template="company_registration_received_email",
+        _step_data=[
+            {
+                'conditions': [],
+                'next': 'stop',
+                'cond_op': 'all',
+                'actions': [
+                    {
+                        'fallback_language': {'constant': 'en'},
+                        'template_data': {
+                             'en': {
+                                 'content_type': 'html',
+                                 'subject': 'Company Registered',
+                                 'body': 'Waiting approval'
+                             },
+                        },
+                        'recipient': {'variable': 'customer_email'},
+                        'language': {'variable': 'language'},
+                        'identifier': 'send_email'
+                    },
+                ],
+                'enabled': True}],
+    )
+    Script.objects.create(
+        event_identifier="company_approved_by_admin",
+        name="Send Company Activated Email",
+        enabled=True,
+        template="company_activated_email",
+        _step_data=[
+            {'actions': [
+                {
+                    'fallback_language': {'constant': 'en'},
+                    'template_data': {
+                        'en': {
+                            'content_type': 'html',
+                            'subject': 'Company activated',
+                            'body': 'Company has been approved. '
+                                    'Please activate your account by clicking the link: {{activation_url}}'
+                        },
+                    },
+                    'recipient': {'variable': 'customer_email'},
+                    'language': {'variable': 'language'},
+                    'identifier': 'send_email'}
+            ],
+                'enabled': True,
+                'next': 'stop',
+                'conditions': [],
+                'cond_op': 'all'
+            }
+        ]
+    )
+    # This view creates CompanyContact object for already registered user
+    view_func = CompanyEditView.as_view()
+
+    if not allow_company_registration:
+        # If company registration is not allowed, users can't convert to company contacts
+        request = apply_request_middleware(rf.get("/"), user=admin_user)
+        response = view_func(request)
+        assert response.status_code == 404
+    else:
+        request = apply_request_middleware(
+            rf.post("/", {
+                'contact-name': "Test company",
+                'contact-name_ext': "test",
+                'contact-tax_number': "12345",
+                'contact-email': "test@example.com",
+                'contact-phone': "123123",
+                'contact-www': "",
+                'billing-name': "testa tesat",
+                'billing-phone': "testa tesat",
+                'billing-email': email,
+                'billing-street': "testa tesat",
+                'billing-street2': "",
+                'billing-postal_code': "12345",
+                'billing-city': "test test",
+                'billing-region': "",
+                'billing-region_code': "",
+                'billing-country': "FI",
+                'shipping-name': "testa tesat",
+                'shipping-phone': "testa tesat",
+                'shipping-email': email,
+                'shipping-street': "testa tesat",
+                'shipping-street2': "",
+                'shipping-postal_code': "12345",
+                'shipping-city': "test test",
+                'shipping-region': "",
+                'shipping-region_code': "",
+                'shipping-country': "FI",
+            }), user=admin_user)
+        response = view_func(request)
+        if company_registration_requires_approval:
+            assert CompanyContact.objects.filter(is_active=False).count() == 1
+            assert PersonContact.objects.filter(is_active=True).count() == 1
+            assert mail.outbox[0].subject == "Company Registered"
+            request = apply_request_middleware(rf.post("/", {"set_is_active": "1"}), user=admin_user)
+            view_func = ContactDetailView.as_view()
+            response = view_func(request, pk=CompanyContact.objects.first().pk)
+            urls = re.findall(
+                'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\(\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+',
+                mail.outbox[1].body)
+            assert mail.outbox[1].subject == "Company activated"
+            assert CompanyContact.objects.filter(is_active=True).count() == 1
+        else:
+            assert CompanyContact.objects.filter(is_active=True).count() == 1
+            assert PersonContact.objects.filter(is_active=True).count() == 1
