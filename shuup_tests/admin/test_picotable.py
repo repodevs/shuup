@@ -10,11 +10,15 @@ import datetime
 import pytest
 from django.contrib.auth import get_user_model
 
+from shuup.admin.modules.products.views import ProductListView
+from shuup.admin.modules.settings.view_settings import ViewSettings
 from shuup.admin.utils.picotable import (
     ChoicesFilter, Column, DateRangeFilter, Filter, MultiFieldTextFilter,
     Picotable, RangeFilter, TextFilter, MPTTFilter
 )
+from shuup.apps.provides import override_provides
 from shuup.core.models import Product, Category
+from shuup.core.models import ShopProduct
 from shuup.testing.mock_population import populate_if_required
 from shuup_tests.utils import empty_iterable
 from shuup_tests.utils.fixtures import regular_user
@@ -23,6 +27,15 @@ from shuup_tests.utils.fixtures import regular_user
 class PicoContext(object):
     def superuser_display(self, instance):  # Test indirect `display` callable
         return "very super" if instance.is_superuser else "-"
+
+
+class HelloWorldColumn(object):
+    def get_hello_world_display(self, shop_product):
+        return "hello-world-%d" % shop_product.pk
+
+    def get_column(self, model, known_names, identifier):
+        return Column("hello_world", u"HelloWorld", display="get_hello_world_display")
+
 
 def instance_id(instance):  # Test direct `display` callable
     return instance.id
@@ -230,3 +243,12 @@ def test_mptt_filter(rf):
 
     data = pico.get_data({"perPage": 100, "page": 1, "filters": {"name": child_category.id}})
     assert len(data["items"]) == 1
+
+
+@pytest.mark.django_db
+def test_provide_columns():
+    with override_provides("provided_columns_ShopProduct", [
+            "shuup_tests.admin.test_picotable:HelloWorldColumn"]):
+        view_settings = ViewSettings(ShopProduct, ProductListView.default_columns, ProductListView)
+        column_ids = [col.id for col in view_settings.inactive_columns]  # provided column is not set active yet
+        assert "hello_world" in column_ids

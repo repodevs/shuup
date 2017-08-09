@@ -22,6 +22,7 @@ from easy_thumbnails.files import get_thumbnailer
 from filer.models import Image
 
 from shuup.admin.utils.urls import get_model_url, NoModelUrl
+from shuup.apps.provides import get_provide_objects
 from shuup.core.models import ProductMedia
 from shuup.utils.dates import try_parse_date
 from shuup.utils.i18n import format_money, get_locally_formatted_datetime
@@ -311,9 +312,18 @@ class Column(object):
         return queryset
 
     def get_display_value(self, context, object):
+        # Look for callable from view context
         display_callable = maybe_callable(self.display, context=context)
         if display_callable:
             return display_callable(object)
+
+        # Look for callable from provided column objects context
+        provide_object_key = "provided_columns_%s" % type(object).__name__
+        for provided_column_object in get_provide_objects(provide_object_key):
+            obj = provided_column_object()
+            display_callable = maybe_callable(self.display, context=obj)
+            if display_callable:
+                return display_callable(object)
 
         value = object
         for bit in self.display.split("__"):
